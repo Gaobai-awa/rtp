@@ -22,17 +22,20 @@ public class CountdownTask {
 
     /** 3 秒倒计时 = 60 tick */
     private static final int COUNTDOWN_TICKS = 60;
+    /** 每隔多少 tick 更新一次 Title（= 1 秒） */
+    private static final int TITLE_INTERVAL = 20;
     private static final double SPIRAL_RADIUS = 0.9;
     private static final double SPIRAL_HEIGHT_PER_TICK = 0.08;
     private static final double SPIRAL_ANGLE_PER_TICK = Math.toRadians(25);
     /** 移动检测阈值：0.2 格 */
     private static final double MOVE_THRESHOLD_SQ = 0.04;
     /** 落地检测：Y 坐标在多少 tick 内不变算落地 */
-    private static final int LANDING_STABLE_TICKS = 20; // 1 秒
+    private static final int LANDING_STABLE_TICKS = 20;
 
     private static final Map<UUID, CountdownState> countdownTasks = new HashMap<>();
-    /** 缓降中的玩家：UUID → 状态（缓降中/已落地待清除） */
     private static final Map<UUID, FallingState> fallingPlayers = new HashMap<>();
+    /** 玩家 cooldown 结束时间（毫秒） */
+    private static final Map<UUID, Long> cooldownEndTimes = new HashMap<>();
 
     // ───────────────────────────────────────────────
     // Public API
@@ -42,11 +45,8 @@ public class CountdownTask {
         public final double x, y, z;
         public final float yaw, pitch;
         public final String worldId;
-        /** 是否需要缓降效果 */
         public final boolean needsSlowFall;
-        /** 缓降等级：1=普通，2=强力（末地） */
         public final int slowFallAmplifier;
-        /** 是否需要落地检测（关闭缓降、清除效果）。地狱不需要。 */
         public final boolean needsLandingCheck;
 
         public TeleportTarget(double x, double y, double z, float yaw, float pitch,
@@ -56,7 +56,7 @@ public class CountdownTask {
             this.yaw = yaw; this.pitch = pitch;
             this.worldId = worldId;
             this.needsSlowFall = needsSlowFall;
-            this.slowFallAmplifier = Math.max(1, slowFallAmplifier); // 只保下限，不限上限（允许4级缓降）
+            this.slowFallAmplifier = slowFallAmplifier;
             this.needsLandingCheck = needsLandingCheck;
         }
     }
@@ -67,10 +67,10 @@ public class CountdownTask {
             return false;
         }
         countdownTasks.put(uuid, new CountdownState(player, target));
-        // 立即显示第 5 秒（倒计时从这一刻开始）
+        // 立即显示第 3 秒（倒计时从这一刻开始）
         sendTitle(player,
             Text.literal("§b§l传送中..."),
-            Text.literal("§7倒计时: §e§l5"));
+            Text.literal("§7倒计时: §e§l3"));
         RtpMod.LOGGER.info("RTP countdown started for {} -> ({}, {}, {}) [amp={}]",
             player.getName().getString(),
             String.format("%.1f", target.x), String.format("%.1f", target.y), String.format("%.1f", target.z),
@@ -80,6 +80,19 @@ public class CountdownTask {
 
     public static boolean isCountdownActive(UUID uuid) {
         return countdownTasks.containsKey(uuid);
+    }
+
+    /** 检查玩家是否在 cooldown 期内，返回剩余秒数（≤0 表示可用）。 */
+    public static int getCooldownRemaining(UUID uuid) {
+        Long end = cooldownEndTimes.get(uuid);
+        if (end == null) return 0;
+        long remaining = end - System.currentTimeMillis();
+        return (int) Math.max(0, remaining / 1000);
+    }
+
+    /** 传送成功后设置 cooldown。 */
+    public static void setCooldown(UUID uuid, int seconds) {
+        cooldownEndTimes.put(uuid, System.currentTimeMillis() + seconds * 1000L);
     }
 
     public static void cancelAll() {
@@ -137,21 +150,28 @@ public class CountdownTask {
                 continue;
             }
 
+            // 严格递增的独立 tick 计数器（不受服务器卡顿影响，不会跳秒）
+            state.tickCounter++;
             state.remainingTicks--;
-            state.totalTicks++;
 
-            // 每秒更新 Title
-            // remainingTicks=60 时不触发；递减后 60→59 触发（显示 3），39→38 触发（2），19→18 触发（1）
-            if (state.remainingTicks % 20 == 0) {
-                int seconds = state.remainingTicks / 20;
-                String color = seconds <= 2 ? "§e§l" : "§7";
-                String title  = seconds == 1 ? "§a即将传送" : "§b传送中...";
-                sendTitle(player, Text.literal(title), Text.literal(color + seconds));
+            // 每隔 TITLE_INTERVAL (20) tick 更新一次 Title（精准每秒）
+            if (state.tickCounter % TITLE_INTERVAL == 0) {
+                // remainingTicks: 60→3s, 40→2s, 20→1s, 0→execute
+                int seconds = state.remainingTicks / TITLE_INTERVAL;
+                if (seconds == 0) {
+                    // 最后一帧已在上方触发传送，下一跳不处理
+                } else if (seconds == 1) {
+                    sendTitle(player, Text.literal("§a即将传送"), Text.literal("§e§l1"));
+                } else if (seconds == 2) {
+                    sendTitle(player, Text.literal("§b传送中..."), Text.literal("§e§l2"));
+                } else {
+                    sendTitle(player, Text.literal("§b传送中..."), Text.literal("§7" + seconds));
+                }
             }
 
             // 每 2 tick 生成螺旋粒子
-            if (state.totalTicks % 2 == 0) {
-                spawnSpiralParticles(player, state.totalTicks / 2);
+            if (state.tickCounter % 2 == 0) {
+                spawnSpiralParticles(player, state.tickCounter / 2);
             }
 
             // 倒计时结束 → 执行传送
@@ -182,7 +202,6 @@ public class CountdownTask {
                 continue;
             }
 
-            // 死亡检测：移除缓降效果和状态
             if (!player.isAlive()) {
                 clearSlowFallEffect(player);
                 iter.remove();
@@ -191,7 +210,6 @@ public class CountdownTask {
             }
 
             if (!state.needsLandingCheck) {
-                // 不需要落地检测（如地狱），跳过
                 continue;
             }
 
@@ -200,19 +218,15 @@ public class CountdownTask {
             state.ticks++;
 
             if (state.lastY < currentY - 0.1) {
-                // 正在上升，重置稳定计数器
                 state.stableTicks = 0;
             } else if (Math.abs(currentY - state.lastY) <= 0.05) {
-                // Y 基本不变（±0.05 误差），认为是停止/落地
                 state.stableTicks++;
             } else {
-                // 正常下降中，重置稳定计数器
                 state.stableTicks = 0;
             }
 
             state.lastY = currentY;
 
-            // 落地判定：连续 20 tick（1 秒）Y 坐标不变
             if (state.stableTicks >= LANDING_STABLE_TICKS) {
                 clearSlowFallEffect(player);
                 iter.remove();
@@ -221,7 +235,6 @@ public class CountdownTask {
                 continue;
             }
 
-            // 异常保护：缓降效果时间过长（> 10 分钟），强制清除
             if (state.ticks > 12000) {
                 clearSlowFallEffect(player);
                 iter.remove();
@@ -266,19 +279,15 @@ public class CountdownTask {
                 3, 0.1, 0.1, 0.1, 0.01);
         }
 
-        // 缓降效果：slowFallAmplifier 为配置中的缓降等级（1=缓降1级, 2=缓降2级, 4=缓降4级）
-        // 对应 Minecraft amplifier：1→0, 2→1, 4→3
         if (tt.needsSlowFall) {
             int amp = Math.max(0, tt.slowFallAmplifier - 1);
             player.addStatusEffect(new StatusEffectInstance(
                 StatusEffects.SLOW_FALLING, 12000, amp, false, false, true));
             if (amp >= 2) {
-                // amp>=2（缓降3级或4级）：额外叠加漂浮效果（2秒）帮助快速下降
                 player.addStatusEffect(new StatusEffectInstance(
                     StatusEffects.LEVITATION, 40, 1, false, false, true));
             }
             if (tt.needsLandingCheck) {
-                // 开启落地检测（主世界和末地岛屿边缘）
                 fallingPlayers.put(player.getUuid(),
                     new FallingState(player.getUuid(), player.getName().getString(), tt.needsLandingCheck));
                 sendTitle(player,
@@ -299,7 +308,24 @@ public class CountdownTask {
         RtpMod.LOGGER.info("RTP completed for {} -> ({}, {}, {}) [amp={}, landingCheck={}]",
             player.getName().getString(),
             String.format("%.1f", tt.x), String.format("%.1f", tt.y), String.format("%.1f", tt.z),
-            tt.slowFallAmplifier, tt.needsSlowFall);
+            tt.slowFallAmplifier, tt.needsLandingCheck);
+
+        // 传送成功后设置 cooldown
+        int cd = RtpMod.CONFIG.cooldownSeconds;
+        if (cd > 0) {
+            CountdownTask.setCooldown(player.getUuid(), cd);
+        }
+    }
+
+    private static ServerWorld findWorld(MinecraftServer server, String worldId) {
+        if (worldId == null) return null;
+        // 遍历所有世界，匹配 Identifier 字符串
+        for (ServerWorld w : server.getWorlds()) {
+            if (w.getRegistryKey().getValue().toString().equals(worldId)) {
+                return w;
+            }
+        }
+        return null;
     }
 
     // ───────────────────────────────────────────────
@@ -312,7 +338,8 @@ public class CountdownTask {
         final Vec3d startPos;
         final String playerName;
         int remainingTicks;
-        int totalTicks;
+        /** 严格递增的 tick 计数器，用于每秒精确触发 Title（不受卡顿跳帧影响） */
+        int tickCounter;
 
         CountdownState(ServerPlayerEntity player, TeleportTarget target) {
             this.playerUuid = player.getUuid();
@@ -320,7 +347,7 @@ public class CountdownTask {
             this.target = target;
             this.startPos = player.getPos();
             this.remainingTicks = COUNTDOWN_TICKS;
-            this.totalTicks = 0;
+            this.tickCounter = 0;
         }
 
         ServerPlayerEntity getPlayer(MinecraftServer server) {
@@ -333,16 +360,16 @@ public class CountdownTask {
         final String playerName;
         final boolean needsLandingCheck;
         double lastY;
-        int stableTicks;   // 连续 tick 中 Y 不变计数
-        int ticks;         // 总经过 tick
+        int ticks;
+        int stableTicks;
 
         FallingState(UUID playerUuid, String playerName, boolean needsLandingCheck) {
             this.playerUuid = playerUuid;
             this.playerName = playerName;
             this.needsLandingCheck = needsLandingCheck;
-            this.lastY = -1;
-            this.stableTicks = 0;
+            this.lastY = -999;
             this.ticks = 0;
+            this.stableTicks = 0;
         }
     }
 
@@ -357,7 +384,10 @@ public class CountdownTask {
             double px = pos.x + Math.cos(angle + s * Math.PI) * SPIRAL_RADIUS;
             double pz = pos.z + Math.sin(angle + s * Math.PI) * SPIRAL_RADIUS;
             double py = pos.y + 0.3 + rise;
-            world.spawnParticles(ParticleTypes.END_ROD, px, py, pz, 1, 0.01, 0.01, 0.01, 0.0);
+
+            world.spawnParticles(ParticleTypes.END_ROD,
+                px, py, pz,
+                1, 0.01, 0.01, 0.01, 0.0);
         }
 
         double angle2 = angle + 1.2;
@@ -365,25 +395,18 @@ public class CountdownTask {
         for (int s = 0; s < 2; s++) {
             double px = pos.x + Math.cos(angle2 + s * Math.PI) * r2;
             double pz = pos.z + Math.sin(angle2 + s * Math.PI) * r2;
-            double py = pos.y + 0.5 + rise;
-            world.spawnParticles(ParticleTypes.ENCHANTED_HIT, px, py, pz, 1, 0.005, 0.005, 0.005, 0.0);
-        }
-    }
+            double py = pos.y + 0.6 + rise * 0.5;
 
-    private static ServerWorld findWorld(MinecraftServer server, String worldId) {
-        if (worldId == null) return null;
-        for (ServerWorld w : server.getWorlds()) {
-            if (w.getRegistryKey().getValue().toString().equals(worldId)) {
-                return w;
-            }
+            world.spawnParticles(ParticleTypes.ENCHANTED_HIT,
+                px, py, pz,
+                1, 0.01, 0.01, 0.01, 0.0);
         }
-        return null;
     }
 
     private static void sendTitle(ServerPlayerEntity player, Text title, Text subtitle) {
+        player.networkHandler.sendPacket(new TitleFadeS2CPacket(10, 40, 10));
         player.networkHandler.sendPacket(new TitleS2CPacket(title));
         player.networkHandler.sendPacket(new SubtitleS2CPacket(subtitle));
-        player.networkHandler.sendPacket(new TitleFadeS2CPacket(5, 40, 10));
     }
 
     private static void clearTitle(ServerPlayerEntity player) {

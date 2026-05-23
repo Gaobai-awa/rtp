@@ -35,6 +35,16 @@ public class RtpCommand {
             return 0;
         }
 
+        // cooldown 检查
+        int cd = RtpMod.CONFIG.cooldownSeconds;
+        if (cd > 0) {
+            int remaining = CountdownTask.getCooldownRemaining(player.getUuid());
+            if (remaining > 0) {
+                player.sendMessage(Text.literal("§c[RTP] 请等待 " + remaining + " 秒后再使用"), false);
+                return 0;
+            }
+        }
+
         int cx = (int) Math.floor(player.getX());
         int cz = (int) Math.floor(player.getZ());
         RtpConfig.Dimension dim = RtpConfig.getDimension(world);
@@ -86,6 +96,7 @@ public class RtpCommand {
             return 0;
         }
 
+        // 传送完成或倒计时结束时，CountdownTask.executeTeleport 里设置 cooldown
         return 1;
     }
 

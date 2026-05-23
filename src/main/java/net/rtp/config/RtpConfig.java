@@ -26,6 +26,8 @@ public class RtpConfig {
     public int minY = -64;
     public int maxY = 320;
     public int searchAttempts = 512;
+    /** 传送后 cooldown 秒数（防止恶意卡服），0=关闭 */
+    public int cooldownSeconds = 60;
 
     // 黑名单（部分匹配，大写比较）
     private static final String[] OVERWORLD_BAD = {
