@@ -1,5 +1,7 @@
 package net.rtp.util;
 
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.network.packet.s2c.play.TitleFadeS2CPacket;
 import net.minecraft.network.packet.s2c.play.TitleS2CPacket;
 import net.minecraft.network.packet.s2c.play.SubtitleS2CPacket;
@@ -23,8 +25,10 @@ public class CountdownTask {
     private static final double SPIRAL_RADIUS = 0.9;
     private static final double SPIRAL_HEIGHT_PER_TICK = 0.08;
     private static final double SPIRAL_ANGLE_PER_TICK = Math.toRadians(25);
-    /** Squared distance threshold: 0.2^2 = 0.04 */
+    /** 移动检测阈值：0.2 格 */
     private static final double MOVE_THRESHOLD_SQ = 0.04;
+    /** 缓降效果持续时间（tick） */
+    private static final int SLOW_FALL_TICKS = 100; // 5 秒
 
     private static final Map<UUID, CountdownState> activeTasks = new HashMap<>();
 
@@ -36,14 +40,17 @@ public class CountdownTask {
         public final double x, y, z;
         public final float yaw, pitch;
         public final String worldId;
+        /** 高空模式：是否需要在传送后给予缓降效果 */
+        public final boolean needsSlowFall;
 
-        public TeleportTarget(double x, double y, double z, float yaw, float pitch, String worldId) {
+        public TeleportTarget(double x, double y, double z, float yaw, float pitch, String worldId, boolean needsSlowFall) {
             this.x = x;
             this.y = y;
             this.z = z;
             this.yaw = yaw;
             this.pitch = pitch;
             this.worldId = worldId;
+            this.needsSlowFall = needsSlowFall;
         }
     }
 
@@ -53,8 +60,9 @@ public class CountdownTask {
             return false;
         }
         activeTasks.put(uuid, new CountdownState(player, target));
+        String modeHint = target.needsSlowFall ? "（高空模式）" : "";
         sendTitle(player,
-            Text.literal("§e传送中..."),
+            Text.literal("§e传送中..." + modeHint),
             Text.literal("§7请保持原地不动"));
         RtpMod.LOGGER.info("RTP countdown started for {} -> ({}, {}, {})",
             player.getName().getString(),
@@ -173,9 +181,8 @@ public class CountdownTask {
         double angle = step * SPIRAL_ANGLE_PER_TICK;
         double rise = step * SPIRAL_HEIGHT_PER_TICK;
 
-        // Two counter-rotating END_ROD pillars
+        // Two END_ROD pillars
         for (int s = 0; s < 2; s++) {
-            double sign = (s == 0) ? 1.0 : -1.0;
             double px = pos.x + Math.cos(angle + s * Math.PI) * SPIRAL_RADIUS;
             double pz = pos.z + Math.sin(angle + s * Math.PI) * SPIRAL_RADIUS;
             double py = pos.y + 0.3 + rise;
@@ -185,7 +192,7 @@ public class CountdownTask {
                 1, 0.01, 0.01, 0.01, 0.0);
         }
 
-        // Inner ENCHANTED_HIT sparkles (phase shifted)
+        // Inner ENCHANTED_HIT sparkles
         double angle2 = angle + 1.2;
         double r2 = 0.45;
         for (int s = 0; s < 2; s++) {
@@ -204,30 +211,28 @@ public class CountdownTask {
             targetWorld = (ServerWorld) player.getWorld();
         }
 
-        // Final safety check
-        int bx = (int) Math.floor(tt.x);
-        int by = (int) Math.floor(tt.y);
-        int bz = (int) Math.floor(tt.z);
-        if (!net.rtp.config.RtpConfig.isSafeLocation(targetWorld, bx, by, bz)) {
-            player.sendMessage(Text.literal("§c[RTP] 目标位置已不安全，传送取消"), false);
-            clearTitle(player);
-            RtpMod.LOGGER.warn("RTP target became unsafe for {} at ({}, {}, {})",
-                player.getName().getString(),
-                String.format("%.1f", tt.x),
-                String.format("%.1f", tt.y),
-                String.format("%.1f", tt.z));
-            return;
-        }
-
-        player.teleport(targetWorld, tt.x, tt.y, tt.z, tt.yaw, tt.pitch);
         clearTitle(player);
 
-        // Success title
-        sendTitle(player, Text.literal("§a§l传送成功！"),
-            Text.literal("§7" + bx + ", " + by + ", " + bz));
+        // 执行传送
+        player.teleport(targetWorld, tt.x, tt.y, tt.z, tt.yaw, tt.pitch);
 
-        // Particle burst at destination
-        Vec3d dest = new Vec3d(tt.x, tt.y, tt.z);
+        // 高空模式：传送到 Y=200 后给予缓降 + 漂浮效果
+        if (tt.needsSlowFall) {
+            player.addStatusEffect(new StatusEffectInstance(
+                StatusEffects.SLOW_FALLING, SLOW_FALL_TICKS, 0, false, false, true));
+            player.addStatusEffect(new StatusEffectInstance(
+                StatusEffects.LEVITATION, 40, 2, false, false, true));
+
+            sendTitle(player,
+                Text.literal("§b§l高空传送！"),
+                Text.literal("§7正在缓降，请打开鞘翅"));
+        } else {
+            sendTitle(player,
+                Text.literal("§a§l传送成功！"),
+                Text.literal("§7" + (int) tt.x + ", " + (int) tt.y + ", " + (int) tt.z));
+        }
+
+        // 粒子爆发
         for (int i = 0; i < 24; i++) {
             double angle = i * (2 * Math.PI / 24);
             double ex = tt.x + Math.cos(angle) * 1.8;
@@ -236,7 +241,6 @@ public class CountdownTask {
             targetWorld.spawnParticles(ParticleTypes.TOTEM_OF_UNDYING,
                 ex, ey, ez, 1, 0.0, 0.0, 0.0, 0.0);
         }
-        // Vertical column
         for (int i = 0; i < 5; i++) {
             targetWorld.spawnParticles(ParticleTypes.END_ROD,
                 tt.x, tt.y + 0.5 + i * 0.4, tt.z,
