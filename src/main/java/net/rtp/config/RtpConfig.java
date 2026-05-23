@@ -63,7 +63,8 @@ public class RtpConfig {
         RegistryKey<World> key = world.getRegistryKey();
         if (key == World.NETHER) return Dimension.NETHER;
         if (key == World.END)    return Dimension.END;
-        return Dimension.UNKNOWN;
+        if (key == World.OVERWORLD) return Dimension.OVERWORLD;
+        return Dimension.UNKNOWN; // 其他 mod 自定义维度兜底
     }
 
     public static enum Dimension {
@@ -86,9 +87,11 @@ public class RtpConfig {
     }
 
     // ─────────────── 主世界 ───────────────
+    // 主世界也采用 BetterRTP 算法：
+    // 从 y=maxY 向下扫描，找 "脚下固体 + 头顶 1 格空气" 的位置，直接传送，无需缓降。
 
     private TeleportResult findOverworldDestination(ServerWorld world, int centerX, int centerZ, Random random) {
-        for (int i = 0; i < searchAttempts; i++) {
+        for (int attempt = 0; attempt < searchAttempts; attempt++) {
             int dx = random.nextInt(maxRadius * 2) - maxRadius;
             int dz = random.nextInt(maxRadius * 2) - maxRadius;
             int x = centerX + dx;
@@ -96,25 +99,44 @@ public class RtpConfig {
 
             ensureChunkLoaded(world, x, z);
 
-            // 高空模式：生成 XZ 随机位置，Y 固定传送到 highAltitudeY
-            int targetY = highAltitudeY;
-            return new TeleportResult(x + 0.5, targetY, z + 0.5, true, true, 1);
-        }
-        // 兜底：搜索地表
-        for (int i = 0; i < searchAttempts; i++) {
-            int dx = random.nextInt(maxRadius * 2) - maxRadius;
-            int dz = random.nextInt(maxRadius * 2) - maxRadius;
-            int x = centerX + dx;
-            int z = centerZ + dz;
-
-            ensureChunkLoaded(world, x, z);
-            BlockPos surface = findSurfaceBlock(world, x, z);
-            if (surface != null && hasAirColumnAbove(world, surface, 5)) {
+            BlockPos surface = findOverworldSurface(world, x, z);
+            if (surface != null) {
                 return new TeleportResult(
                     surface.getX() + 0.5, surface.getY() + 1.0, surface.getZ() + 0.5,
-                    true, false, 1   // 需要缓降，1级，落地检测开启
+                    false, false, 0   // 直传，不需要缓降
                 );
             }
+        }
+        return null;
+    }
+
+    /**
+     * 主世界地表搜索：从 maxY 向下，找脚下固体 + 头顶 1 格空气。
+     * 排除洞穴/低位。
+     */
+    private BlockPos findOverworldSurface(ServerWorld world, int x, int z) {
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        // 黑名单（部分匹配）
+        String[] bad = { "LAVA", "WATER", "GRASS", "TALL_GRASS", "LILY", "SNOW", "CAKE" };
+
+        for (int y = 256; y >= minY; y--) {
+            mut.set(x, y, z);
+            BlockState state = world.getBlockState(mut);
+            if (state.isAir()) continue;
+            if (state.isLiquid()) continue;
+            if (isBadBlock(state, bad)) continue;
+
+            // 脚下
+            mut.set(x, y - 1, z);
+            BlockState below = world.getBlockState(mut);
+            if (below.isAir() || below.isLiquid() || isBadBlock(below, bad)) continue;
+            if (isBadBlock(state, bad)) continue;
+
+            // 头顶 1 格空气
+            mut.set(x, y + 1, z);
+            if (!world.getBlockState(mut).isAir()) continue;
+
+            return new BlockPos(x, y, z);
         }
         return null;
     }
