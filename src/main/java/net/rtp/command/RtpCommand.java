@@ -76,7 +76,7 @@ public class RtpCommand {
 
         // 步骤 3：找到位置后才开始倒计时（5 秒）
         player.sendMessage(Text.literal("§a[RTP] §f找到目标！坐标 (" +
-            (int) result.x + ", " + (int) result.y + ", " + (int) result.z + ")，5 秒后传送..."), false);
+            (int) result.x + ", " + (int) result.y + ", " + (int) result.z + ")，3 秒后传送..."), false);
         sendTitle(player,
             Text.literal("§b§l传送中..."),
             Text.literal("§7目标: " + (int) result.x + ", " + (int) result.y + ", " + (int) result.z));
