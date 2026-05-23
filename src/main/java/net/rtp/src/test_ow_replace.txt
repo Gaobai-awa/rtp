@@ -1,0 +1,49 @@
+    private TeleportResult findOverworldDestination(ServerWorld world, int centerX, int centerZ, Random random) {
+        BlockPos.Mutable top = new BlockPos.Mutable();
+        BlockPos.Mutable check0 = new BlockPos.Mutable();
+        BlockPos.Mutable check1 = new BlockPos.Mutable();
+        BlockPos.Mutable checkBelow = new BlockPos.Mutable();
+
+        for (int attempt = 0; attempt < searchAttempts; attempt++) {
+            int dx = random.nextInt(maxRadius * 2) - maxRadius;
+            int dz = random.nextInt(maxRadius * 2) - maxRadius;
+            int x = centerX + dx;
+            int z = centerZ + dz;
+
+            ensureChunksLoaded(world, x, z);
+
+            // getTopY 是 O(1) 高度图查询，直接返回该列"脚踩"高度
+            int surfaceY = world.getTopY(Direction.DOWN, x, z);
+            if (surfaceY < minY || surfaceY > maxY) continue;
+
+            top.set(x, surfaceY, z);
+            BlockState topState = world.getBlockState(top);
+
+            // 若 surfaceY 是非固体方块（水/草/叶/灌木），退 1 格
+            if (!topState.isFullCube(world, top)) {
+                surfaceY--;
+                if (surfaceY < minY) continue;
+            }
+
+            // 重新取地面方块
+            top.set(x, surfaceY, z);
+            BlockState surfaceState = world.getBlockState(top);
+            if (isBadBlock(surfaceState, OVERWORLD_BAD)) continue;
+
+            // 头顶 1 格空气
+            check0.set(x, surfaceY + 1, z);
+            if (!world.getBlockState(check0).isAir()) continue;
+            // 头顶 2 格空气
+            check1.set(x, surfaceY + 2, z);
+            if (!world.getBlockState(check1).isAir()) continue;
+
+            // 脚下固体
+            checkBelow.set(x, surfaceY - 1, z);
+            BlockState below = world.getBlockState(checkBelow);
+            if (below.isAir() || below.isLiquid()) continue;
+            if (isBadBlock(below, OVERWORLD_BAD)) continue;
+
+            return new TeleportResult(x + 0.5, surfaceY + 1.0, z + 0.5, false, false, 0);
+        }
+        return null;
+    }

@@ -6,9 +6,10 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
+import net.minecraft.registry.RegistryKey;
 import net.rtp.RtpMod;
 
 import java.io.IOException;
@@ -96,17 +97,14 @@ public class RtpConfig {
     }
 
     // ─────────────── 主世界（BetterRTP 核心算法）──
-    // 1. 生成随机 XZ
-    // 2. world.getHighestBlockAt() 获取最高非空方块（高度图）
-    // 3. 若最高方块非固体（水/草/灌木），退到 y-1
-    // 4. 确认 y 在 [minY, maxY]，且不在黑名单
-    // 5. 传送到 (x+0.5, y+1, z+0.5)
+    // 用 heightmap (getTopY) O(1) 定位地表高度，替代逐格扫描。
+    // 取最高方块，若非固体/水/黑名单则退 y-1，确认 2 格空气 + 脚下固体后传送。
 
     private TeleportResult findOverworldDestination(ServerWorld world, int centerX, int centerZ, Random random) {
-        BlockPos.Mutable mut = new BlockPos.Mutable();
-
-        // 从世界最大高度向下扫描（Fabric 1.20.1 没有 getHighestY()，用 320 作为起始）
-        final int topY = 320;
+        BlockPos.Mutable top = new BlockPos.Mutable();
+        BlockPos.Mutable check0 = new BlockPos.Mutable();
+        BlockPos.Mutable check1 = new BlockPos.Mutable();
+        BlockPos.Mutable checkBelow = new BlockPos.Mutable();
 
         for (int attempt = 0; attempt < searchAttempts; attempt++) {
             int dx = random.nextInt(maxRadius * 2) - maxRadius;
@@ -116,58 +114,40 @@ public class RtpConfig {
 
             ensureChunksLoaded(world, x, z);
 
-            // BetterRTP 风格：使用高度图，从 topY 向下找第一个非空方块
-            mut.set(x, topY, z);
-
-            // 从最高处向下找到第一个非空方块
-            while (mut.getY() > minY) {
-                BlockState s = world.getBlockState(mut);
-                if (!s.isAir() && !s.isLiquid()) break;
-                mut.setY(mut.getY() - 1);
-            }
-
-            int highestBlockY = mut.getY();
-            if (highestBlockY < minY) continue;
-
-            BlockState highestState = world.getBlockState(mut);
-
-            // 若最高方块非固体（如草/水下/灌木），看脚下 y-1
-            int surfaceY = highestBlockY;
-            if (!highestState.isFullCube(world, mut)) {
-                // 草/水/植物：脚下才是真正的地面
-                surfaceY = highestBlockY - 1;
-                if (surfaceY < minY) continue;
-                mut.setY(surfaceY);
-            }
-
-            BlockState surfaceState = world.getBlockState(mut);
-
-            // y 范围检查
+            // getTopY is O(1) heightmap - replaces the slow while loop
+            int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING, x, z);
             if (surfaceY < minY || surfaceY > maxY) continue;
 
-            // 黑名单检查
+            top.set(x, surfaceY, z);
+            BlockState topState = world.getBlockState(top);
+
+            // Non-solid top (water/grass/leaves) -> step down 1
+            if (!topState.isFullCube(world, top)) {
+                surfaceY--;
+                if (surfaceY < minY) continue;
+            }
+
+            top.set(x, surfaceY, z);
+            BlockState surfaceState = world.getBlockState(top);
             if (isBadBlock(surfaceState, OVERWORLD_BAD)) continue;
 
-            // 头顶 1 格必须是空气
-            mut.setY(surfaceY + 1);
-            if (!world.getBlockState(mut).isAir()) continue;
-            // 再上面 1 格也检查一下（BetterRTP 确保 2 格高度）
-            mut.setY(surfaceY + 2);
-            if (!world.getBlockState(mut).isAir()) continue;
+            // Head space: 2 blocks of air above
+            check0.set(x, surfaceY + 1, z);
+            if (!world.getBlockState(check0).isAir()) continue;
+            check1.set(x, surfaceY + 2, z);
+            if (!world.getBlockState(check1).isAir()) continue;
 
-            // 脚下必须是固体
-            mut.setY(surfaceY - 1);
-            BlockState below = world.getBlockState(mut);
+            // Solid below
+            checkBelow.set(x, surfaceY - 1, z);
+            BlockState below = world.getBlockState(checkBelow);
             if (below.isAir() || below.isLiquid()) continue;
             if (isBadBlock(below, OVERWORLD_BAD)) continue;
 
-            return new TeleportResult(
-                x + 0.5, surfaceY + 1.0, z + 0.5,
-                false, false, 0
-            );
+            return new TeleportResult(x + 0.5, surfaceY + 1.0, z + 0.5, false, false, 0);
         }
         return null;
     }
+
 
     // ─────────────── 地狱（BetterRTP NETHER 算法）────
     // 从 minY+1 向上扫，找「当前非空+脚下固体+头顶空气」
