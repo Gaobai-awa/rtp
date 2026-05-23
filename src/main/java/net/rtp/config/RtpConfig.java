@@ -3,6 +3,7 @@ package net.rtp.config;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.RegistryKey;
@@ -119,58 +120,88 @@ public class RtpConfig {
     }
 
     // ─────────────── 地狱 ───────────────
+    // 算法参考 BetterRTP：从 minY+1 往上扫空气，
+    // 找到空气后检查脚下(y-1)是固体、头顶(y+1)是空气。
+    // 这样能找到 ceiling（固体天花板）和 solid floor（落脚点）之间的空洞。
 
     private TeleportResult findNetherDestination(ServerWorld world, int centerX, int centerZ, Random random) {
-        for (int i = 0; i < searchAttempts; i++) {
+        // 地狱高度：minY=30（略高于基岩层），maxY=118（天花板以下）
+        final int minY = 30;
+        final int maxY = 118;
+        // 黑名单方块名（部分匹配，跳过）
+        String[] badBlockNames = {
+            "LAVA", "MAGMA", "FIRE", "SOUL", "BED"
+        };
+
+        for (int attempt = 0; attempt < searchAttempts; attempt++) {
             int dx = random.nextInt(maxRadius * 2) - maxRadius;
             int dz = random.nextInt(maxRadius * 2) - maxRadius;
             int x = centerX + dx;
             int z = centerZ + dz;
 
-            // 地狱预加载 5x5 区块确保地形完整
+            // 预加载 5x5 区块
             ensureChunksLoadedNether(world, x, z);
 
-            // 在 y=30 到 y=120 之间找固体地面
-            BlockPos floor = findNetherFloor(world, x, z);
-            if (floor == null) continue;
+            // 从 minY+1 往上扫（BetterRTP 核心算法）
+            BlockPos.Mutable cur = new BlockPos.Mutable(x, minY + 1, z);
+            for (int y = minY + 1; y < maxY; y++) {
+                cur.set(x, y, z);
 
-            // 最终安全检查：玩家落脚位置（x+0.5, y+1, z+0.5）不能卡在方块里
-            if (!isNetherFloorSafeForPlayer(world, floor.getX(), floor.getY(), floor.getZ())) continue;
+                // 当前方块不是空气/不是固体（液体如岩浆）
+                BlockState curState = world.getBlockState(cur);
+                if (curState.isAir()) continue; // 当前是空气，跳过
+                if (curState.isLiquid()) continue; // 岩浆/水跳过
+                // 检查是否是黑名单方块
+                if (isBadBlock(curState, badBlockNames)) continue;
 
-            return new TeleportResult(
-                floor.getX() + 0.5, floor.getY() + 1.0, floor.getZ() + 0.5,
-                false, false, 0   // 不需要缓降，不需要落地检测
-            );
-        }
-        return null;
-    }
+                // 脚下方块（y-1）必须是固体
+                cur.set(x, y - 1, z);
+                BlockState belowState = world.getBlockState(cur);
+                if (belowState.isAir() || belowState.isLiquid()) continue; // 脚下是空气/岩浆，跳过
+                if (isBadBlock(belowState, badBlockNames)) continue;
 
-    /**
-     * 在地狱中搜索固体地面（y 从 maxY 往下找第一个有碰撞箱的方块）。
-     * 跳过空气、岩浆、虚空空气、基岩。
-     */
-    private BlockPos findNetherFloor(ServerWorld world, int x, int z) {
-        BlockPos.Mutable mut = new BlockPos.Mutable();
-        for (int y = 120; y >= 30; y--) {
-            mut.set(x, y, z);
-            if (isNetherFloorBlock(world, mut)) {
-                return new BlockPos(x, y, z);
+                // 头顶（y+1）必须是空气
+                cur.set(x, y + 1, z);
+                BlockState aboveState = world.getBlockState(cur);
+                if (!aboveState.isAir()) continue; // 头顶不是空气，跳过
+
+                // 最终确认落脚点安全（玩家碰撞箱2格高，周围无岩浆）
+                if (!isNetherPlayerSafe(world, x, y, z)) continue;
+
+                return new TeleportResult(
+                    x + 0.5, y + 0.0, z + 0.5,
+                    false, false, 0   // 地狱直传，不需要缓降/落地检测
+                );
             }
         }
         return null;
     }
 
-    /** 判断某个位置是否为可作为落脚点的地狱固体方块（非空、非岩浆、非基岩）。 */
-    private boolean isNetherFloorBlock(ServerWorld world, BlockPos.Mutable pos) {
-        Block b = world.getBlockState(pos).getBlock();
-        if (b == Blocks.AIR || b == Blocks.LAVA || b == Blocks.MAGMA_BLOCK
-                || b == Blocks.BEDROCK || b == Blocks.VOID_AIR) return false;
-        // 必须是真正有碰撞箱的固体方块（不是荧石、灵魂沙等）
-        return !world.getBlockState(pos).getCollisionShape(world, pos).isEmpty();
+    /** 判断方块名是否在黑名单中（部分匹配，大写比较）。 */
+    private boolean isBadBlock(BlockState state, String[] bad) {
+        String name = state.getBlock().getName().getString().toUpperCase(java.util.Locale.ROOT);
+        for (String b : bad) {
+            if (name.contains(b)) return true;
+        }
+        return false;
+    }
+
+    /** 地狱落脚安全检查：玩家位置(x+0.5, y, z+0.5) 周围3x3无岩浆。 */
+    private boolean isNetherPlayerSafe(ServerWorld world, int bx, int by, int bz) {
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        for (int ox = -1; ox <= 1; ox++) {
+            for (int oz = -1; oz <= 1; oz++) {
+                for (int oy = -1; oy <= 2; oy++) {
+                    mut.set(bx + ox, by + oy, bz + oz);
+                    if (world.getBlockState(mut).isOf(Blocks.LAVA)) return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**
-     * 地狱：预加载 5x 5 区块（半径 2 格）。
+     * 地狱：预加载 5x5 区块。
      */
     private void ensureChunksLoadedNether(ServerWorld world, int x, int z) {
         int cx = x >> 4;
@@ -184,35 +215,6 @@ public class RtpConfig {
                 }
             }
         }
-    }
-
-    /**
-     * 地狱落脚安全检查：确保玩家碰撞箱（2格高）的位置没有被方块占据。
-     * 检查以 (bx, by, bz) 为地面中心，y=by 为脚底，y=by+1 为头顶。
-     * 周围 3x3 范围内不能有岩浆。
-     */
-    private boolean isNetherFloorSafeForPlayer(ServerWorld world, int bx, int by, int bz) {
-        // 基础高度保护
-        if (by <= 5) return false; // 基岩层以上太近
-        if (by >= 118) return false; // 太接近天花板
-
-        // 检查玩家落脚位置（脚底和头顶）是否被固体占据
-        BlockPos footPos = new BlockPos(bx, by, bz);
-        BlockPos headPos = new BlockPos(bx, by + 1, bz);
-        if (!world.getBlockState(footPos).getCollisionShape(world, footPos).isEmpty()) return false;
-        if (!world.getBlockState(headPos).getCollisionShape(world, headPos).isEmpty()) return false;
-
-        // 周围 3x3 范围内检查岩浆（玩家可能会偏移）
-        BlockPos.Mutable mut = new BlockPos.Mutable();
-        for (int odx = -1; odx <= 1; odx++) {
-            for (int odz = -1; odz <= 1; odz++) {
-                for (int ody = -1; ody <= 2; ody++) {
-                    mut.set(bx + odx, by + ody, bz + odz);
-                    if (world.getBlockState(mut).isOf(Blocks.LAVA)) return false;
-                }
-            }
-        }
-        return true;
     }
 
     // ─────────────── 末地 ───────────────
@@ -272,7 +274,7 @@ public class RtpConfig {
         ensureChunksLoadedEnd(world, x, z);
 
         return new TeleportResult(
-            x + 0.5, 120.0, z + 0.5,
+            x + 0.5, 200.0, z + 0.5,
             true, true, 4   // 缓降4级(amp=3)，落地检测开启
         );
     }
