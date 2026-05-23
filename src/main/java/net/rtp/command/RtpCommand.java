@@ -2,14 +2,10 @@ package net.rtp.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
-import net.minecraft.command.argument.EntityAnchorArgumentType;
-import net.minecraft.entity.effect.StatusEffectInstance;
-import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
-import net.minecraft.world.World;
 import net.rtp.RtpMod;
 import net.rtp.config.RtpConfig;
 import net.rtp.util.CountdownTask;
@@ -29,10 +25,8 @@ public class RtpCommand {
 
     public static int execute(ServerCommandSource source) throws CommandSyntaxException {
         ServerPlayerEntity player = source.getPlayerOrThrow();
-        RtpConfig cfg = RtpMod.CONFIG;
         ServerWorld world = (ServerWorld) player.getWorld();
 
-        // 检查是否已有倒计时在进行
         if (CountdownTask.isCountdownActive(player.getUuid())) {
             player.sendMessage(Text.literal("§c[RTP] 你已经在传送倒计时中，请等待完成"), false);
             return 0;
@@ -41,29 +35,51 @@ public class RtpCommand {
         int cx = (int) Math.floor(player.getX());
         int cz = (int) Math.floor(player.getZ());
 
-        // 立即在聊天框给搜索反馈
-        player.sendMessage(Text.literal("§6[RTP] §f正在寻找传送位置..."), false);
+        RtpConfig.Dimension dim = RtpConfig.getDimension(world);
+        String dimName;
+        switch (dim) {
+            case NETHER: dimName = "§c地狱§f"; break;
+            case END:    dimName = "§5末地§f"; break;
+            default:     dimName = "§a主世界§f";
+        }
 
-        // 搜索目的地
-        RtpConfig.TeleportResult result = cfg.findDestination(world, cx, cz, RANDOM);
+        player.sendMessage(Text.literal("§6[RTP] §f正在" + dimName + "中寻找传送位置..."), false);
+
+        RtpConfig.TeleportResult result = RtpMod.CONFIG.findDestination(world, cx, cz, RANDOM);
 
         if (result == null) {
-            if (cfg.highAltitudeMode) {
-                player.sendMessage(Text.literal("§c[RTP] 未能生成有效目标位置，请重试"), false);
-            } else {
-                player.sendMessage(Text.literal("§c[RTP] 在半径 " + cfg.maxRadius + " 格内未找到安全地表位置，请尝试移动后重试"), false);
+            String hint;
+            switch (dim) {
+                case NETHER:
+                    hint = "§c[RTP] 地狱中未找到安全位置，请移动后重试";
+                    break;
+                case END:
+                    hint = "§c[RTP] 末地中未找到岛屿位置，请移动后重试";
+                    break;
+                default:
+                    hint = "§c[RTP] 未找到传送位置，请重试";
             }
+            player.sendMessage(Text.literal(hint), false);
             return 0;
         }
 
-        player.sendMessage(Text.literal("§a[RTP] §f找到目标！即将开始倒计时..."), false);
+        String modeHint;
+        if (!result.needsSlowFall) {
+            modeHint = dim == RtpConfig.Dimension.NETHER ? "（地狱直传）" : "（地表传送）";
+        } else if (result.slowFallAmplifier >= 2) {
+            modeHint = "（末地强力缓降）";
+        } else {
+            modeHint = "（高空缓降）";
+        }
+        player.sendMessage(Text.literal("§a[RTP] §f找到目标" + modeHint + "，即将开始倒计时..."), false);
 
-        // 构建传送目标
         CountdownTask.TeleportTarget target = new CountdownTask.TeleportTarget(
             result.x, result.y, result.z,
             0.0f, 0.0f,
             world.getRegistryKey().getValue().toString(),
-            result.needsSlowFall
+            result.needsSlowFall,
+            result.slowFallAmplifier,
+            result.needsLandingCheck
         );
 
         boolean started = CountdownTask.startCountdown(player, target);
