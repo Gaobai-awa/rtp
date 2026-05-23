@@ -1,15 +1,15 @@
 package net.rtp.util;
 
-import net.minecraft.block.BlockState;
+import net.minecraft.network.packet.s2c.play.TitleFadeS2CPacket;
+import net.minecraft.network.packet.s2c.play.TitleS2CPacket;
+import net.minecraft.network.packet.s2c.play.SubtitleS2CPacket;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.World;
-import net.rtp.config.RtpConfig;
+import net.rtp.RtpMod;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -18,13 +18,19 @@ import java.util.UUID;
 
 public class CountdownTask {
 
-    public static final int COUNTDOWN_TICKS = 60; // 3 seconds at 20 TPS
-    private static final double SPIRAL_RADIUS = 1.5;
-    private static final double SPIRAL_ANGLE_PER_TICK = Math.toRadians(30);
-    private static final double SPIRAL_HEIGHT_PER_TICK = 0.1;
-    private static final double MOVE_THRESHOLD_SQ = 0.01; // squared distance to detect movement
+    /** 3 seconds = 60 ticks at 20 TPS */
+    private static final int COUNTDOWN_TICKS = 60;
+    private static final double SPIRAL_RADIUS = 0.9;
+    private static final double SPIRAL_HEIGHT_PER_TICK = 0.08;
+    private static final double SPIRAL_ANGLE_PER_TICK = Math.toRadians(25);
+    /** Squared distance threshold: 0.2^2 = 0.04 */
+    private static final double MOVE_THRESHOLD_SQ = 0.04;
 
     private static final Map<UUID, CountdownState> activeTasks = new HashMap<>();
+
+    // ───────────────────────────────────────────────
+    // Public API
+    // ───────────────────────────────────────────────
 
     public static class TeleportTarget {
         public final double x, y, z;
@@ -32,11 +38,111 @@ public class CountdownTask {
         public final String worldId;
 
         public TeleportTarget(double x, double y, double z, float yaw, float pitch, String worldId) {
-            this.x = x; this.y = y; this.z = z;
-            this.yaw = yaw; this.pitch = pitch;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.yaw = yaw;
+            this.pitch = pitch;
             this.worldId = worldId;
         }
     }
+
+    public static boolean startCountdown(ServerPlayerEntity player, TeleportTarget target) {
+        UUID uuid = player.getUuid();
+        if (activeTasks.containsKey(uuid)) {
+            return false;
+        }
+        activeTasks.put(uuid, new CountdownState(player, target));
+        sendTitle(player,
+            Text.literal("§e传送中..."),
+            Text.literal("§7请保持原地不动"));
+        RtpMod.LOGGER.info("RTP countdown started for {} -> ({}, {}, {})",
+            player.getName().getString(),
+            String.format("%.1f", target.x),
+            String.format("%.1f", target.y),
+            String.format("%.1f", target.z));
+        return true;
+    }
+
+    public static boolean isCountdownActive(UUID uuid) {
+        return activeTasks.containsKey(uuid);
+    }
+
+    public static void cancelAll() {
+        int count = activeTasks.size();
+        activeTasks.clear();
+        if (count > 0) {
+            RtpMod.LOGGER.info("Cancelled {} active RTP countdown tasks", count);
+        }
+    }
+
+    // ───────────────────────────────────────────────
+    // Tick loop
+    // ───────────────────────────────────────────────
+
+    public static void tickAll(MinecraftServer server) {
+        if (activeTasks.isEmpty()) return;
+
+        Iterator<Map.Entry<UUID, CountdownState>> iter = activeTasks.entrySet().iterator();
+        while (iter.hasNext()) {
+            CountdownState state = iter.next().getValue();
+
+            ServerPlayerEntity player = state.getPlayer(server);
+            if (player == null) {
+                iter.remove();
+                RtpMod.LOGGER.info("RTP cancelled for {} (disconnected)", state.playerName);
+                continue;
+            }
+            if (!player.isAlive()) {
+                player.sendMessage(Text.literal("§c[RTP] 你在倒计时期间死亡，传送已取消"), false);
+                clearTitle(player);
+                iter.remove();
+                RtpMod.LOGGER.info("RTP cancelled for {} (died)", state.playerName);
+                continue;
+            }
+
+            // Check movement
+            Vec3d current = player.getPos();
+            if (current.squaredDistanceTo(state.startPos) > MOVE_THRESHOLD_SQ) {
+                player.sendMessage(Text.literal("§c[RTP] 你在倒计时期间移动了！传送已取消！"), false);
+                clearTitle(player);
+                sendTitle(player, Text.literal("§c传送取消"), Text.literal("§7移动了"));
+                iter.remove();
+                RtpMod.LOGGER.info("RTP cancelled for {} (moved)", state.playerName);
+                continue;
+            }
+
+            state.remainingTicks--;
+            state.totalTicks++;
+
+            // Every second: update Title with remaining seconds
+            int seconds = (state.remainingTicks / 20) + 1;
+            if (state.remainingTicks > 0 && state.remainingTicks % 20 == 0) {
+                if (seconds == 1) {
+                    sendTitle(player, Text.literal("§a即将传送"), Text.literal("§e§l1"));
+                } else if (seconds == 2) {
+                    sendTitle(player, Text.literal("§e即将传送"), Text.literal("§f" + seconds));
+                } else {
+                    sendTitle(player, Text.literal("§e传送中..."), Text.literal("§7" + seconds));
+                }
+            }
+
+            // Every 2 ticks: spawn spiral particle effect around player
+            if (state.totalTicks % 2 == 0) {
+                spawnSpiralParticles(player, state.totalTicks / 2);
+            }
+
+            // Countdown finished
+            if (state.remainingTicks <= 0) {
+                executeTeleport(player, state.target);
+                iter.remove();
+            }
+        }
+    }
+
+    // ───────────────────────────────────────────────
+    // Internal
+    // ───────────────────────────────────────────────
 
     private static class CountdownState {
         final UUID playerUuid;
@@ -55,151 +161,114 @@ public class CountdownTask {
             this.totalTicks = 0;
         }
 
-        /**
-         * Check if the player is still valid (online, alive, same world constraints don't matter).
-         */
-        boolean isValid(MinecraftServer server) {
-            ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerUuid);
-            if (player == null) return false;
-            if (!player.isAlive()) return false;
-            return true;
-        }
-
         ServerPlayerEntity getPlayer(MinecraftServer server) {
             return server.getPlayerManager().getPlayer(playerUuid);
         }
     }
 
-    public static boolean startCountdown(ServerPlayerEntity player, TeleportTarget target) {
-        if (activeTasks.containsKey(player.getUuid())) {
-            return false;
+    private static void spawnSpiralParticles(ServerPlayerEntity player, int step) {
+        ServerWorld world = (ServerWorld) player.getWorld();
+        Vec3d pos = player.getPos();
+
+        double angle = step * SPIRAL_ANGLE_PER_TICK;
+        double rise = step * SPIRAL_HEIGHT_PER_TICK;
+
+        // Two counter-rotating END_ROD pillars
+        for (int s = 0; s < 2; s++) {
+            double sign = (s == 0) ? 1.0 : -1.0;
+            double px = pos.x + Math.cos(angle + s * Math.PI) * SPIRAL_RADIUS;
+            double pz = pos.z + Math.sin(angle + s * Math.PI) * SPIRAL_RADIUS;
+            double py = pos.y + 0.3 + rise;
+
+            world.spawnParticles(ParticleTypes.END_ROD,
+                px, py, pz,
+                1, 0.01, 0.01, 0.01, 0.0);
         }
-        activeTasks.put(player.getUuid(), new CountdownState(player, target));
-        RtpMod.LOGGER.info("RTP countdown started for {} -> ({:.1f}, {:.1f}, {:.1f})",
-            player.getName().getString(), target.x, target.y, target.z);
-        return true;
-    }
 
-    public static void tickAll(MinecraftServer server) {
-        if (activeTasks.isEmpty()) return;
-
-        Iterator<Map.Entry<UUID, CountdownState>> iter = activeTasks.entrySet().iterator();
-        while (iter.hasNext()) {
-            CountdownState state = iter.next().getValue();
-
-            // 1. Check if player is still online and alive
-            ServerPlayerEntity player = state.getPlayer(server);
-            if (player == null) {
-                // Player disconnected
-                iter.remove();
-                RtpMod.LOGGER.info("RTP cancelled for {} (disconnected)", state.playerName);
-                continue;
-            }
-            if (!player.isAlive()) {
-                // Player died during countdown
-                player.sendMessage(Text.literal("\u00a7c[RTP] \u4f60\u5728\u5012\u8ba1\u65f6\u95f4\u6b7b\u4ea1\uff0c\u4f20\u9001\u5df2\u53d6\u6d88"), false);
-                iter.remove();
-                RtpMod.LOGGER.info("RTP cancelled for {} (died)", state.playerName);
-                continue;
-            }
-
-            // 2. Check if player moved during countdown
-            Vec3d currentPos = player.getPos();
-            if (currentPos.squaredDistanceTo(state.startPos) > MOVE_THRESHOLD_SQ) {
-                player.sendMessage(Text.literal("\u00a7c[RTP] \u4f60\u5728\u5012\u8ba1\u65f6\u95f4\u79fb\u52a8\u4e86\uff01\u4f20\u9001\u5df2\u53d6\u6d88\uff01"), false);
-                iter.remove();
-                RtpMod.LOGGER.info("RTP cancelled for {} (moved)", state.playerName);
-                continue;
-            }
-
-            state.remainingTicks--;
-            state.totalTicks++;
-
-            // 3. Show countdown title message every second
-            if (state.remainingTicks > 0 && state.remainingTicks % 20 == 0) {
-                int seconds = (state.remainingTicks / 20) + 1;
-                player.sendMessage(Text.literal("\u00a76[RTP] \u5373\u5c06\u4f20\u9001..." + "\u00a7f" + seconds + " \u79d2"), true);
-            }
-
-            // 4. Spiral particle effect every 2 ticks (0.1s)
-            if (state.totalTicks % 2 == 0) {
-                ServerWorld world = (ServerWorld) player.getWorld();
-                double angle = state.totalTicks * SPIRAL_ANGLE_PER_TICK;
-                double rise = state.totalTicks * SPIRAL_HEIGHT_PER_TICK;
-
-                for (int side = 0; side < 2; side++) {
-                    double sign = (side == 0) ? 1.0 : -1.0;
-                    double px = currentPos.x + Math.cos(angle + side * Math.PI) * SPIRAL_RADIUS;
-                    double pz = currentPos.z + Math.sin(angle + side * Math.PI) * SPIRAL_RADIUS;
-                    double py = currentPos.y + 0.5 + rise;
-
-                    world.spawnParticles(ParticleTypes.END_ROD, px, py, pz, 1, 0.0, 0.0, 0.0, 0.0);
-                }
-            }
-
-            // 5. Execute teleport when countdown reaches 0
-            if (state.remainingTicks <= 0) {
-                executeTeleport(server, player, state.target);
-                iter.remove();
-            }
+        // Inner ENCHANTED_HIT sparkles (phase shifted)
+        double angle2 = angle + 1.2;
+        double r2 = 0.45;
+        for (int s = 0; s < 2; s++) {
+            double px = pos.x + Math.cos(angle2 + s * Math.PI) * r2;
+            double pz = pos.z + Math.sin(angle2 + s * Math.PI) * r2;
+            double py = pos.y + 0.5 + rise;
+            world.spawnParticles(ParticleTypes.ENCHANTED_HIT,
+                px, py, pz,
+                1, 0.005, 0.005, 0.005, 0.0);
         }
     }
 
-    private static void executeTeleport(MinecraftServer server, ServerPlayerEntity player, TeleportTarget tt) {
-        // Find target world
-        ServerWorld targetWorld = null;
-        if (tt.worldId != null) {
-            for (ServerWorld w : server.getWorlds()) {
-                if (w.getRegistryKey().getValue().toString().equals(tt.worldId)) {
-                    targetWorld = w;
-                    break;
-                }
-            }
-        }
-        // Fallback to player's current world
+    private static void executeTeleport(ServerPlayerEntity player, TeleportTarget tt) {
+        ServerWorld targetWorld = findWorld(player.getServer(), tt.worldId);
         if (targetWorld == null) {
             targetWorld = (ServerWorld) player.getWorld();
         }
 
+        // Final safety check
         int bx = (int) Math.floor(tt.x);
         int by = (int) Math.floor(tt.y);
         int bz = (int) Math.floor(tt.z);
-
-        // Double-check safety at final position
-        if (!RtpConfig.isSafeLocation(targetWorld, bx, by, bz)) {
-            player.sendMessage(Text.literal("\u00a7c[RTP] \u76ee\u6807\u4f4d\u7f6e\u5df2\u4e0d\u5b89\u5168\uff0c\u4f20\u9001\u53d6\u6d88"), false);
-            RtpMod.LOGGER.warn("RTP target became unsafe for {} at {:.1f} {:.1f} {:.1f}",
-                player.getName().getString(), tt.x, tt.y, tt.z);
+        if (!net.rtp.config.RtpConfig.isSafeLocation(targetWorld, bx, by, bz)) {
+            player.sendMessage(Text.literal("§c[RTP] 目标位置已不安全，传送取消"), false);
+            clearTitle(player);
+            RtpMod.LOGGER.warn("RTP target became unsafe for {} at ({}, {}, {})",
+                player.getName().getString(),
+                String.format("%.1f", tt.x),
+                String.format("%.1f", tt.y),
+                String.format("%.1f", tt.z));
             return;
         }
 
-        // Teleport
-        player.teleport(targetWorld, tt.x, tt.y, tt.z, tt.yaw, tt.pitch,$
-        player.sendMessage(Text.literal("\u00a7a\u00a7l[RTP] \u00a7f\u00a7l\u4f20\u9001\u6210\u529f\uff01"), false);
+        player.teleport(targetWorld, tt.x, tt.y, tt.z, tt.yaw, tt.pitch);
+        clearTitle(player);
 
-        // Particle burst on successful teleport
-        for (int i = 0; i < 30; i++) {
-            double angle = i * (2 * Math.PI / 30);
-            double ex = tt.x + Math.cos(angle) * 2.0;
-            double ez = tt.z + Math.sin(angle) * 2.0;
+        // Success title
+        sendTitle(player, Text.literal("§a§l传送成功！"),
+            Text.literal("§7" + bx + ", " + by + ", " + bz));
+
+        // Particle burst at destination
+        Vec3d dest = new Vec3d(tt.x, tt.y, tt.z);
+        for (int i = 0; i < 24; i++) {
+            double angle = i * (2 * Math.PI / 24);
+            double ex = tt.x + Math.cos(angle) * 1.8;
+            double ez = tt.z + Math.sin(angle) * 1.8;
             double ey = tt.y + 1.0;
-            targetWorld.spawnParticles(ParticleTypes.TOTEM_OF_UNDYING, ex, ey, ez, 1, 0.0, 0.0, 0.0, 0.0);
+            targetWorld.spawnParticles(ParticleTypes.TOTEM_OF_UNDYING,
+                ex, ey, ez, 1, 0.0, 0.0, 0.0, 0.0);
+        }
+        // Vertical column
+        for (int i = 0; i < 5; i++) {
+            targetWorld.spawnParticles(ParticleTypes.END_ROD,
+                tt.x, tt.y + 0.5 + i * 0.4, tt.z,
+                3, 0.1, 0.1, 0.1, 0.01);
         }
 
-        RtpMod.LOGGER.info("RTP completed for {} to world={} ({:.1f}, {:.1f}, {:.1f})",
-            player.getName().getString(), targetWorld.getRegistryKey().getValue().toString(), tt.x, tt.y, tt.z);
+        player.sendMessage(Text.literal("§a[RTP] §f传送成功！"), false);
+        RtpMod.LOGGER.info("RTP completed for {} -> world={} ({}, {}, {})",
+            player.getName().getString(),
+            targetWorld.getRegistryKey().getValue().toString(),
+            String.format("%.1f", tt.x),
+            String.format("%.1f", tt.y),
+            String.format("%.1f", tt.z));
     }
 
-    /** Cancel all active countdown tasks. Used on server shutdown. */
-    public static void cancelAll() {
-        int count = activeTasks.size();
-        activeTasks.clear();
-        if (count > 0) {
-            RtpMod.LOGGER.info("Cancelled {} active RTP countdown tasks", count);
+    private static ServerWorld findWorld(MinecraftServer server, String worldId) {
+        if (worldId == null) return null;
+        for (ServerWorld w : server.getWorlds()) {
+            if (w.getRegistryKey().getValue().toString().equals(worldId)) {
+                return w;
+            }
         }
+        return null;
     }
 
-    public static boolean isCountdownActive(UUID uuid) {
-        return activeTasks.containsKey(uuid);
+    private static void sendTitle(ServerPlayerEntity player, Text title, Text subtitle) {
+        player.networkHandler.sendPacket(new TitleS2CPacket(title));
+        player.networkHandler.sendPacket(new SubtitleS2CPacket(subtitle));
+        player.networkHandler.sendPacket(new TitleFadeS2CPacket(5, 40, 10));
+    }
+
+    private static void clearTitle(ServerPlayerEntity player) {
+        player.networkHandler.sendPacket(new TitleFadeS2CPacket(0, 0, 0));
     }
 }

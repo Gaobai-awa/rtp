@@ -1,39 +1,54 @@
-# Random Teleport Mod
+# Random Teleport (RTP)
 
-Minecraft 1.20.1 Fabric \u2014 \u968f\u673a\u4f20\u9001\u5230\u5730\u8868\u5b89\u5168\u4f4d\u7f6e
+Minecraft 1.20.1 Fabric 模组 — 随机传送到地表安全位置。
 
-## \u547d\u4ee4
+## 命令
 
-| \u547d\u4ee4 | \u63cf\u8ff0 |
+| 命令 | 描述 |
 |---|---|
-| `/rtp` | \u5c06\u4f60\u968f\u673a\u4f20\u9001\u5230 3000 \u683c\u5185\u7684\u5730\u8868\u5b89\u5168\u4f4d\u7f6e\uff0c\u5e26 3 \u79d2\u5012\u8ba1\u65f6 |
+| `/rtp` | 随机传送到半径 3000 格内的地表安全位置，带 3 秒倒计时 |
 
-## \u7279\u70b9
+## 功能
 
-- **\u5730\u8868\u68c0\u6d4b**: \u4fdd\u8bc1\u4f20\u9001\u5230\u5b89\u5168\u7684\u5730\u8868\u4f4d\u7f6e\uff0c\u4e0d\u4f1a\u88ab\u65b9\u5757\u5360\u6362
-- **3 \u79d2\u5012\u8ba1**: \u5c06\u663e\u793a\u5728\u5c4f\u5e55\u4e2d\u592e\uff0c\u79fb\u52a8\u5219\u53d6\u6d88
-- **\u87ba\u65cb\u7c92\u5b50**: \u7c92\u5b50\u5706\u73af\u800c\u4e0a\u5347\uff0c\u7ec4\u6210\u7f8e\u89c2\u7684\u87ba\u65cb\u6548\u679c
-- **\u53ef\u914d\u7f6e**: \u4f20\u9001\u8303\u56f4\u53ef\u5728 `config/rtp/config.json` \u4e2d\u8c03\u6574
+- **地表检测**：保证传送到安全的地面位置，不会被方块卡住或传送到地下洞穴
+- **3 秒倒计时**：屏幕中央显示 Title 提示"传送中... / 请保持原地不动"，移动则传送取消
+- **螺旋粒子**：倒计时期间 END_ROD + ENCHANTED_HIT 粒子环绕玩家上升
+- **传送完成**：落地后播放粒子爆发，并显示传送成功 Title
 
-## \u73af\u5883
+## 配置
+
+文件：`config/rtp/config.json`
+
+```json
+{
+  "maxRadius": 3000,
+  "minY": -64,
+  "maxY": 320,
+  "searchAttempts": 100
+}
+```
+
+| 字段 | 说明 | 默认值 |
+|---|---|---|
+| `maxRadius` | 传送半径（格） | 3000 |
+| `minY` | 搜索起始 Y 轴最低值 | -64 |
+| `maxY` | 搜索起始 Y 轴最高值 | 320 |
+| `searchAttempts` | 每次搜索的最大尝试次数 | 100 |
+
+## 环境
 
 - Minecraft 1.20.1
 - Fabric Loader 0.15+
 - Java 17+
 
-## \u914d\u7f6e\u6587\u4ef6
+## 构建
 
-`config/rtp/config.json`:
-
-```json
-{
-  "maxRadius": 3000,
-  "minY": 60,
-  "maxY": 320,
-  "attempts": 100
-}
+```bash
+./gradlew build
 ```
 
-## \u4f5c\u8005
+jar 文件输出到 `build/libs/`。
+
+## 作者
 
 Gaobaiawa
