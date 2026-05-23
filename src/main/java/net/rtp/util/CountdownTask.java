@@ -56,7 +56,7 @@ public class CountdownTask {
             this.yaw = yaw; this.pitch = pitch;
             this.worldId = worldId;
             this.needsSlowFall = needsSlowFall;
-            this.slowFallAmplifier = Math.max(1, Math.min(slowFallAmplifier, 2));
+            this.slowFallAmplifier = Math.max(1, slowFallAmplifier); // 只保下限，不限上限（允许4级缓降）
             this.needsLandingCheck = needsLandingCheck;
         }
     }
@@ -274,15 +274,16 @@ public class CountdownTask {
                 3, 0.1, 0.1, 0.1, 0.01);
         }
 
-        // 缓降效果
+        // 缓降效果：slowFallAmplifier 为配置中的缓降等级（1=缓降1级, 2=缓降2级, 4=缓降4级）
+        // 对应 Minecraft amplifier：1→0, 2→1, 4→3
         if (tt.needsSlowFall) {
-            int amp = Math.max(0, tt.slowFallAmplifier - 1); // amplifier: 1→0, 2→1
+            int amp = Math.max(0, tt.slowFallAmplifier - 1);
             player.addStatusEffect(new StatusEffectInstance(
                 StatusEffects.SLOW_FALLING, 12000, amp, false, false, true));
-            if (tt.slowFallAmplifier >= 2) {
-                // 强力模式：额外叠加漂浮效果（2秒）
+            if (amp >= 2) {
+                // amp>=2（缓降3级或4级）：额外叠加漂浮效果（2秒）帮助快速下降
                 player.addStatusEffect(new StatusEffectInstance(
-                    StatusEffects.LEVITATION, 40, 2, false, false, true));
+                    StatusEffects.LEVITATION, 40, 1, false, false, true));
             }
             if (tt.needsLandingCheck) {
                 // 开启落地检测（主世界和末地岛屿边缘）

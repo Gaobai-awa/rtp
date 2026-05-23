@@ -38,9 +38,10 @@ public class RtpCommand {
         RtpConfig.Dimension dim = RtpConfig.getDimension(world);
         String dimName;
         switch (dim) {
-            case NETHER: dimName = "§c地狱§f"; break;
-            case END:    dimName = "§5末地§f"; break;
-            default:     dimName = "§a主世界§f";
+            case NETHER:   dimName = "§c地狱§f";  break;
+            case END:      dimName = "§5末地§f"; break;
+            case UNKNOWN:  dimName = "§d[自定义维度]§f"; break;
+            default:       dimName = "§a主世界§f";
         }
 
         player.sendMessage(Text.literal("§6[RTP] §f正在" + dimName + "中寻找传送位置..."), false);
