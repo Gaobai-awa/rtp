@@ -1,0 +1,22 @@
+{
+    "schemaVersion": 1,
+    "id": "rtp",
+    "version": "${version}",
+    "name": "Random Teleport",
+    "description": "Randomly teleport to a safe surface location within a configurable radius.\nCommands: /rtp",
+    "authors": ["Gaobaiawa"],
+    "contact": {
+        "sources": "https://github.com/Gaobai-awa/rtp"
+    },
+    "license": "MIT",
+    "environment": "*",
+    "entrypoints": {
+        "main": ["net.rtp.RtpMod"]
+    },
+    "depends": {
+        "fabricloader": ">=0.15.0",
+        "fabric-api": "*",
+        "minecraft": "1.20.1",
+        "java": ">=17"
+    }
+}
