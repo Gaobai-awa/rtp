@@ -67,15 +67,10 @@ public class CountdownTask {
             return false;
         }
         countdownTasks.put(uuid, new CountdownState(player, target));
-        String dimHint = "";
-        if (target.worldId != null) {
-            if (target.worldId.contains("nether")) dimHint = "（地狱）";
-            else if (target.worldId.contains("end")) dimHint = "（末地）";
-            else dimHint = target.needsSlowFall ? "（高空模式）" : "";
-        } else {
-            dimHint = target.needsSlowFall ? "（高空模式）" : "";
-        }
-        sendTitle(player, Text.literal("§e传送中..." + dimHint), Text.literal("§7请保持原地不动"));
+        // 立即显示第 5 秒（倒计时从这一刻开始）
+        sendTitle(player,
+            Text.literal("§b§l传送中..."),
+            Text.literal("§7倒计时: §e§l5"));
         RtpMod.LOGGER.info("RTP countdown started for {} -> ({}, {}, {}) [amp={}]",
             player.getName().getString(),
             String.format("%.1f", target.x), String.format("%.1f", target.y), String.format("%.1f", target.z),
@@ -146,15 +141,12 @@ public class CountdownTask {
             state.totalTicks++;
 
             // 每秒更新 Title
-            if (state.remainingTicks > 0 && state.remainingTicks % 20 == 0) {
-                int seconds = (state.remainingTicks / 20) + 1;
-                if (seconds == 1) {
-                    sendTitle(player, Text.literal("§a即将传送"), Text.literal("§e§l1"));
-                } else if (seconds == 2) {
-                    sendTitle(player, Text.literal("§e即将传送"), Text.literal("§f" + seconds));
-                } else {
-                    sendTitle(player, Text.literal("§e传送中..."), Text.literal("§7" + seconds));
-                }
+            // remainingTicks=60 时不触发；递减后 60→59 触发（显示 3），39→38 触发（2），19→18 触发（1）
+            if (state.remainingTicks % 20 == 0) {
+                int seconds = state.remainingTicks / 20;
+                String color = seconds <= 2 ? "§e§l" : "§7";
+                String title  = seconds == 1 ? "§a即将传送" : "§b传送中...";
+                sendTitle(player, Text.literal(title), Text.literal(color + seconds));
             }
 
             // 每 2 tick 生成螺旋粒子
