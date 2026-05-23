@@ -9,6 +9,7 @@ import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
 import net.rtp.RtpMod;
 import net.rtp.config.RtpConfig;
 import net.rtp.util.CountdownTask;
@@ -20,13 +21,21 @@ public class RtpCommand {
     private static final Random RANDOM = new Random();
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
+        // /rtp —— 正常模式（各维度使用优化后的算法）
         dispatcher.register(
             net.minecraft.server.command.CommandManager.literal("rtp")
-                .executes(ctx -> execute(ctx.getSource()))
+                .executes(ctx -> execute(ctx.getSource(), false))
+        );
+
+        // /rtp fall —— 高空模式（Y=200 + 缓降 2 级，不限维度）
+        dispatcher.register(
+            net.minecraft.server.command.CommandManager.literal("rtp")
+                .then(net.minecraft.server.command.CommandManager.literal("fall")
+                    .executes(ctx -> execute(ctx.getSource(), true)))
         );
     }
 
-    public static int execute(ServerCommandSource source) throws CommandSyntaxException {
+    public static int execute(ServerCommandSource source, boolean forceHighAltitude) throws CommandSyntaxException {
         ServerPlayerEntity player = source.getPlayerOrThrow();
         ServerWorld world = (ServerWorld) player.getWorld();
 
@@ -35,7 +44,6 @@ public class RtpCommand {
             return 0;
         }
 
-        // cooldown 检查
         int cd = RtpMod.CONFIG.cooldownSeconds;
         if (cd > 0) {
             int remaining = CountdownTask.getCooldownRemaining(player.getUuid());
@@ -56,17 +64,24 @@ public class RtpCommand {
             default:       dimHint = "§a主世界§f";
         }
 
-        // 步骤 1：搜索前提示（告诉玩家不要动，服务器可能卡顿）
-        player.sendMessage(Text.literal("§6[RTP] §f正在§f" + dimHint + "§f中寻找安全位置..."), false);
-        player.sendMessage(Text.literal("§7请勿移动，服务器可能卡顿一段时间..."), false);
-        sendTitle(player,
-            Text.literal("§e§l正在搜索..."),
-            Text.literal("§7" + dimHint + " - 请勿移动"));
+        if (forceHighAltitude) {
+            player.sendMessage(Text.literal("§6[RTP] §f正在" + dimHint + "中随机选点，高空降落模式..."), false);
+            player.sendMessage(Text.literal("§7请勿移动，服务器可能卡顿一段时间..."), false);
+            sendTitle(player, Text.literal("§e§l高空模式..."), Text.literal("§7" + dimHint + " - 请勿移动"));
+        } else {
+            player.sendMessage(Text.literal("§6[RTP] §f正在§f" + dimHint + "§f中寻找安全位置..."), false);
+            player.sendMessage(Text.literal("§7请勿移动，服务器可能卡顿一段时间..."), false);
+            sendTitle(player, Text.literal("§e§l正在搜索..."), Text.literal("§7" + dimHint + " - 请勿移动"));
+        }
 
-        // 步骤 2：搜索（同步，可能卡顿）
-        RtpConfig.TeleportResult result = RtpMod.CONFIG.findDestination(world, cx, cz, RANDOM);
+        // 搜索
+        RtpConfig.TeleportResult result;
+        if (forceHighAltitude) {
+            result = findHighAltitudeDestination(world, cx, cz, RANDOM, dim);
+        } else {
+            result = RtpMod.CONFIG.findDestination(world, cx, cz, RANDOM);
+        }
 
-        // 搜索完毕，清除搜索 Title
         clearTitle(player);
 
         if (result == null) {
@@ -74,8 +89,9 @@ public class RtpCommand {
             return 0;
         }
 
-        // 步骤 3：找到位置后才开始倒计时（5 秒）
-        player.sendMessage(Text.literal("§a[RTP] §f找到目标！坐标 (" +
+        // 找到位置后：3 秒倒计时
+        String modeName = forceHighAltitude ? "高空模式" : "标准模式";
+        player.sendMessage(Text.literal("§a[RTP] §f找到目标！§b[" + modeName + "]§f 坐标 (" +
             (int) result.x + ", " + (int) result.y + ", " + (int) result.z + ")，3 秒后传送..."), false);
         sendTitle(player,
             Text.literal("§b§l传送中..."),
@@ -96,8 +112,44 @@ public class RtpCommand {
             return 0;
         }
 
-        // 传送完成或倒计时结束时，CountdownTask.executeTeleport 里设置 cooldown
         return 1;
+    }
+
+    // ─────────────── /rtp fall 高空模式 ───────────────
+    // 纯随机 XZ（半径 maxRadius），Y 固定 highAltitudeY，缓降 2 级，落地检测
+    private static RtpConfig.TeleportResult findHighAltitudeDestination(
+            ServerWorld world, int centerX, int centerZ, Random random, RtpConfig.Dimension dim) {
+
+        int maxR = RtpMod.CONFIG.maxRadius;
+        int highY = 200; // 高空模式固定 Y=200
+
+        // 直接随机 XZ，预加载后返回结果，无需搜索
+        int dx = random.nextInt(maxR * 2) - maxR;
+        int dz = random.nextInt(maxR * 2) - maxR;
+        int x = centerX + dx;
+        int z = centerZ + dz;
+
+        // 预加载 5x5 区块
+        ensureChunkLoadedStatic(world, x, z);
+
+        return new RtpConfig.TeleportResult(
+            x + 0.5, highY, z + 0.5,
+            true,   // needsSlowFall
+            true,   // needsLandingCheck
+            2       // amplifier = 2（强力缓降）
+        );
+    }
+
+    private static void ensureChunkLoadedStatic(ServerWorld world, int x, int z) {
+        int cx = x >> 4, cz = z >> 4;
+        for (int ox = -2; ox <= 2; ox++) {
+            for (int oz = -2; oz <= 2; oz++) {
+                int nx = cx + ox, nz = cz + oz;
+                if (!world.getChunkManager().isChunkLoaded(nx, nz)) {
+                    try { world.getChunk(nx, nz); } catch (Exception ignored) {}
+                }
+            }
+        }
     }
 
     private static void sendTitle(ServerPlayerEntity player, Text title, Text subtitle) {
